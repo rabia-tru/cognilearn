@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CogniLearn Connection Test</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .status { padding: 15px; margin: 10px 0; border-radius: 8px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .testing { background: #fff3cd; color: #856404; }
+        button { padding: 10px 20px; font-size: 16px; margin: 10px 5px; }
+    </style>
+</head>
+<body>
+    <h1>CogniLearn Connection Test</h1>
+    
+    <div id="status" class="status testing">Testing connection...</div>
+    
+    <button onclick="testConnection()">Test Again</button>
+    <button onclick="testWithLocalhost()">Test localhost:3000</button>
+    <button onclick="testWithIP()">Test 192.168.18.174:3000</button>
+    
+    <div id="details" style="margin-top: 20px; font-family: monospace; white-space: pre-wrap;"></div>
+    
+    <script>
+        async function testEndpoint(url) {
+            const details = document.getElementById('details');
+            details.textContent += `\nTesting: ${url}\n`;
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' }
+                });
+                
+                const data = await response.json();
+                details.textContent += `✓ Success! Response: ${JSON.stringify(data, null, 2)}\n`;
+                return true;
+            } catch (error) {
+                details.textContent += `✗ Failed: ${error.message}\n`;
+                return false;
+            }
+        }
+        
+        async function testConnection() {
+            const status = document.getElementById('status');
+            const details = document.getElementById('details');
+            
+            status.className = 'status testing';
+            status.textContent = 'Testing all endpoints...';
+            details.textContent = 'Starting connection tests...\n';
+            
+            const endpoints = [
+                'http://localhost:3000/api/health',
+                'http://10.0.2.2:3000/api/health',
+                'http://192.168.18.174:3000/api/health'
+            ];
+            
+            let success = false;
+            for (const endpoint of endpoints) {
+                if (await testEndpoint(endpoint)) {
+                    success = true;
+                    status.className = 'status success';
+                    status.textContent = `✓ Connected via: ${endpoint}`;
+                    break;
+                }
+            }
+            
+            if (!success) {
+                status.className = 'status error';
+                status.textContent = '✗ Could not connect to any backend server';
+            }
+        }
+        
+        async function testWithLocalhost() {
+            document.getElementById('details').textContent = '';
+            await testEndpoint('http://localhost:3000/api/health');
+        }
+        
+        async function testWithIP() {
+            document.getElementById('details').textContent = '';
+            await testEndpoint('http://192.168.18.174:3000/api/health');
+        }
+        
+        // Auto-test on load
+        window.addEventListener('load', testConnection);
+    </script>
+</body>
+</html>

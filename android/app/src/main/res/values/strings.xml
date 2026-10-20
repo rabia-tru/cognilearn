@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CogniLearn</string>
+    <string name="title_activity_main">CogniLearn</string>
+    <string name="package_name">com.cognilearn.app</string>
+    <string name="custom_url_scheme">com.cognilearn.app</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "CogniLearn - AI Document Flashcards & Quiz Study Deck",
+  "description": "Transform any document, lecture notes, or PDF into interactive flashcards and adaptive quizzes to master any subject faster.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
