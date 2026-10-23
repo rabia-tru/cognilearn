@@ -22,7 +22,14 @@ import {
   Globe,
 } from 'lucide-react';
 import { AppSettings, StudyDeck } from '../types';
-import { detectWorkingHost, DEFAULT_LAN_IP } from '../utils/api';
+import {
+  detectWorkingHost,
+  DEFAULT_LAN_IP,
+  getActiveBackendUrl,
+  getCandidateHosts,
+  setManualBackendUrl,
+  clearManualBackendUrl,
+} from '../utils/api';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -56,10 +63,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (host) {
       setConnectionStatus('ok');
       setDetectedHost(host);
-      if (!serverUrl) {
-        // Auto-save detected working host
-        localStorage.setItem('cognilearn_working_host', host);
-      }
     } else {
       setConnectionStatus('fail');
     }
@@ -68,13 +71,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveServerUrl = () => {
     const trimmed = serverUrl.trim();
     if (!trimmed) {
-      localStorage.removeItem('cognilearn_backend_url');
-      localStorage.removeItem('cognilearn_working_host');
-    } else {
-      const normalized = trimmed.startsWith('http') ? trimmed : `http://${trimmed}`;
-      localStorage.setItem('cognilearn_backend_url', normalized);
-      setServerUrl(normalized);
+      clearManualBackendUrl();
+      setServerUrl('');
+      return;
     }
+    const normalized = setManualBackendUrl(trimmed);
+    setServerUrl(normalized || trimmed);
   };
 
   const testTTSVoice = (rate: number) => {
@@ -416,9 +418,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            The app needs to reach your PC backend server to generate flashcards, quizzes, and Feynman explanations.
-            Make sure your phone is connected via <strong>USB</strong> (adb reverse) or on the <strong>same Wi-Fi</strong> network as your PC (IP: {DEFAULT_LAN_IP.split(':')[0]}).
+            The app talks to your PC backend server to generate flashcards, quizzes, and Feynman explanations.
+            The address is <strong>hardcoded</strong> ({DEFAULT_LAN_IP}) and the app probes it automatically - keep the phone on the
+            <strong> same Wi-Fi</strong> as your PC, or connect via <strong>USB</strong> with <code>adb reverse tcp:3000 tcp:3000</code>.
+            If the PC IP changes, set it below once and it is remembered.
           </p>
+
+          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 text-[10px] text-slate-600 space-y-1">
+            <p>
+              <span className="font-bold text-slate-700">Currently using:</span>{' '}
+              <span className="font-mono text-indigo-700">{getActiveBackendUrl()}</span>
+            </p>
+            <p>
+              <span className="font-bold text-slate-700">Auto-probed in order:</span>{' '}
+              <span className="font-mono">{getCandidateHosts().join('  →  ')}</span>
+            </p>
+          </div>
 
           {/* Auto Detect */}
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
@@ -470,7 +485,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {serverUrl && (
                 <button
                   type="button"
-                  onClick={() => { setServerUrl(''); localStorage.removeItem('cognilearn_backend_url'); localStorage.removeItem('cognilearn_working_host'); }}
+                  onClick={() => { clearManualBackendUrl(); setServerUrl(''); }}
                   className="px-3 py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-semibold transition-colors shrink-0"
                 >
                   Clear

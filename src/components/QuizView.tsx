@@ -19,6 +19,7 @@ import confetti from 'canvas-confetti';
 import { StudyDeck, QuizQuestion, AppSettings } from '../types';
 import { ConceptDeepDiveModal } from './ConceptDeepDiveModal';
 import { safeApiFetch } from '../utils/api';
+import { buildOfflineReinforcement } from '../utils/offlineGenerator';
 
 interface QuizViewProps {
   deck: StudyDeck;
@@ -51,6 +52,7 @@ export const QuizView: React.FC<QuizViewProps> = ({
   // AI Weak Area Reinforcement
   const [isReinforcing, setIsReinforcing] = useState(false);
   const [reinforceError, setReinforceError] = useState<string | null>(null);
+  const [reinforceNotice, setReinforceNotice] = useState<string | null>(null);
 
   // Concept modal
   const [deepDiveConcept, setDeepDiveConcept] = useState<string | null>(null);
@@ -79,6 +81,9 @@ export const QuizView: React.FC<QuizViewProps> = ({
     setIsCompleted(false);
     setSecondsElapsed(0);
   }, [deck.id]);
+
+  const currentQuestion: QuizQuestion | undefined = questions[currentIndex];
+  const totalQuestions = questions.length;
 
   // Keyboard shortcuts for quiz navigation
   useEffect(() => {
@@ -112,9 +117,6 @@ export const QuizView: React.FC<QuizViewProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isAnswered, isCompleted, currentQuestion]);
-
-  const currentQuestion: QuizQuestion | undefined = questions[currentIndex];
-  const totalQuestions = questions.length;
 
   const handleSelectOption = (idx: number) => {
     if (isAnswered || !currentQuestion) return;
@@ -209,6 +211,7 @@ export const QuizView: React.FC<QuizViewProps> = ({
 
     setIsReinforcing(true);
     setReinforceError(null);
+    setReinforceNotice(null);
 
     try {
       const response = await safeApiFetch('/api/reinforce-weak-areas', {
@@ -229,6 +232,9 @@ export const QuizView: React.FC<QuizViewProps> = ({
       if (!response.ok) throw new Error('Failed to generate reinforcement quiz.');
 
       const data = await response.json();
+      if (!data.questions || data.questions.length === 0) {
+        throw new Error('The server did not return any drill questions.');
+      }
       if (data.questions && data.questions.length > 0) {
         // Append new diagnostic questions and start targeted quiz
         setQuestions(data.questions);
@@ -240,7 +246,35 @@ export const QuizView: React.FC<QuizViewProps> = ({
         setSecondsElapsed(0);
       }
     } catch (err: any) {
-      setReinforceError(err.message || 'Error generating reinforcement questions.');
+      // Any failure (unreachable backend, AI error, timeout) falls back to a
+      // drill built from the deck that is already on the phone.
+      {
+        const offlineQuestions = buildOfflineReinforcement(
+          deck,
+          missed.map((m) => ({
+            question: m.question.question,
+            correctAnswer: m.question.options[m.question.correctIndex],
+            explanation: m.question.explanation,
+            topicTag: m.question.topicTag,
+          })),
+          Math.min(4, Math.max(2, missed.length + 1))
+        );
+
+        if (offlineQuestions.length > 0) {
+          setQuestions(offlineQuestions);
+          setCurrentIndex(0);
+          setSelectedOption(null);
+          setIsAnswered(false);
+          setUserAnswers([]);
+          setIsCompleted(false);
+          setSecondsElapsed(0);
+          setReinforceNotice(
+            'Built this drill on-device from your own deck (the AI tutor was not reachable).'
+          );
+        } else {
+          setReinforceError('Not enough material in this deck to build an offline drill.');
+        }
+      }
     } finally {
       setIsReinforcing(false);
     }
@@ -371,6 +405,12 @@ export const QuizView: React.FC<QuizViewProps> = ({
           {reinforceError && (
             <div className="p-3 mx-6 mt-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs">
               {reinforceError}
+            </div>
+          )}
+
+          {reinforceNotice && (
+            <div className="p-3 mx-6 mt-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+              {reinforceNotice}
             </div>
           )}
 

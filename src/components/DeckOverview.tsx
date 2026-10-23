@@ -241,6 +241,14 @@ export const DeckOverview: React.FC<DeckOverviewProps> = ({
               <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-md bg-indigo-50 text-indigo-700">
                 Study Set
               </span>
+              {deck.generatedOffline && (
+                <span
+                  className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-200"
+                  title="This deck was built on the device because the AI backend was unreachable."
+                >
+                  On-device deck
+                </span>
+              )}
               <span className="text-xs text-slate-500 font-medium">
                 {deck.sourceFileName || 'Document'}
               </span>

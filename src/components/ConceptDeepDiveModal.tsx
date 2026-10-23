@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { X, Sparkles, Lightbulb, BookOpen, AlertTriangle, Brain, Loader2 } from 'lucide-react';
 import { safeApiFetch } from '../utils/api';
+import { buildOfflineExplanation } from '../utils/offlineGenerator';
 
 interface ConceptDeepDiveModalProps {
   isOpen: boolean;
@@ -50,9 +51,14 @@ export const ConceptDeepDiveModal: React.FC<ConceptDeepDiveModalProps> = ({
           setLoading(false);
         }
       })
+
       .catch((err) => {
         if (isMounted) {
-          setError(err.message || 'Error communicating with AI tutor.');
+          // Any failure (unreachable backend, AI error, timeout) falls back to the
+          // on-device study guide so the tutor is never a dead end.
+          console.warn('Deep dive fell back to the on-device tutor:', err);
+          setExplanation(buildOfflineExplanation(concept, context || ''));
+          setError(null);
           setLoading(false);
         }
       });

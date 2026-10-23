@@ -356,6 +356,11 @@ export const FlashcardView: React.FC<FlashcardViewProps> = ({
             <span>Study Deck</span>
             <span>•</span>
             <span className="text-slate-500">{deck.sourceFileName || 'Document Deck'}</span>
+            {deck.generatedOffline && (
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-50 text-amber-700 border border-amber-200">
+                On-device
+              </span>
+            )}
           </div>
           <h2 className="text-lg sm:text-2xl font-extrabold text-slate-900 tracking-tight">
             {deck.title}

@@ -21,6 +21,8 @@ import { DEMO_PRESET_DOCUMENTS } from '../data/sampleDecks';
 import { StudyDeck } from '../types';
 import { useVoiceToText } from '../hooks/useVoiceToText';
 import { safeApiFetch } from '../utils/api';
+import { generateOfflineDeck } from '../utils/offlineGenerator';
+import { extractTextFromPdf, base64ToBytes } from '../utils/pdfText';
 
 interface UploadViewProps {
   onDeckCreated: (newDeck: StudyDeck) => void;
@@ -51,6 +53,7 @@ export const UploadView: React.FC<UploadViewProps> = ({ onDeckCreated, onCancel 
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [generationNotice, setGenerationNotice] = useState<string | null>(null);
 
   const [detectedBackupDeck, setDetectedBackupDeck] = useState<StudyDeck | null>(null);
 
@@ -166,8 +169,28 @@ export const UploadView: React.FC<UploadViewProps> = ({ onDeckCreated, onCancel 
     setActiveTab('paste');
   };
 
+  /** Reads the text of the selected file on-device (PDFs are parsed locally). */
+  const readUploadText = async (): Promise<string> => {
+    if (fileTextContent) return fileTextContent;
+    if (fileBase64) {
+      try {
+        const bytes = base64ToBytes(fileBase64);
+        const isPdf =
+          (fileMimeType || '').toLowerCase().includes('pdf') ||
+          (bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50);
+        if (isPdf) {
+          return await extractTextFromPdf(bytes);
+        }
+      } catch (err) {
+        console.error('Local PDF extraction failed', err);
+      }
+    }
+    return pastedText;
+  };
+
   const handleSubmit = async () => {
     setErrorMessage(null);
+    setGenerationNotice(null);
 
     const hasFile = Boolean(selectedFile && (fileBase64 || fileTextContent));
     const hasPasted = Boolean(pastedText.trim().length > 30);
@@ -231,6 +254,7 @@ export const UploadView: React.FC<UploadViewProps> = ({ onDeckCreated, onCancel 
       // Supplement deck with metadata
       const newDeck: StudyDeck = {
         ...data.deck,
+        generatedOffline: Boolean(data.generatedOffline || data.deck.generatedOffline),
         sourceFileName: selectedFile?.name || (documentTitle ? `${documentTitle}.txt` : 'Uploaded Notes.txt'),
         sourceFileSize: selectedFile ? `${(selectedFile.size / 1024).toFixed(1)} KB` : `${pastedText.length} chars`,
         stats: {
@@ -241,9 +265,32 @@ export const UploadView: React.FC<UploadViewProps> = ({ onDeckCreated, onCancel 
         },
       };
 
+      if (data.notice) setGenerationNotice(data.notice);
+
       onDeckCreated(newDeck);
     } catch (err: any) {
       console.error(err);
+
+      // Backend unreachable -> build the deck on-device so the phone stays useful.
+      if (err?.code === 'BACKEND_UNAVAILABLE') {
+        const localText = await readUploadText();
+        const offlineDeck = generateOfflineDeck({
+          text: localText,
+          titleHint: documentTitle.trim(),
+          cardCount,
+          quizCount,
+          difficulty,
+          focusArea,
+          sourceFileName: selectedFile?.name || (documentTitle ? `${documentTitle}.txt` : 'Uploaded Notes.txt'),
+          sourceFileSize: selectedFile ? `${(selectedFile.size / 1024).toFixed(1)} KB` : `${pastedText.length} chars`,
+        });
+        setGenerationNotice(
+          'The backend could not be reached, so this deck was built on your phone from the document itself.'
+        );
+        onDeckCreated(offlineDeck);
+        return;
+      }
+
       setErrorMessage(err.message || 'An error occurred while generating the study deck. Please try again.');
     } finally {
       setIsGenerating(false);
@@ -653,6 +700,17 @@ export const UploadView: React.FC<UploadViewProps> = ({ onDeckCreated, onCancel 
               </div>
             </div>
           </div>
+
+          {/* Notice Banner (e.g. deck built without the AI provider) */}
+          {generationNotice && (
+            <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start gap-3 text-xs sm:text-sm">
+              <AlertCircle className="w-5 h-5 shrink-0 text-amber-600 mt-0.5" />
+              <div>
+                <p className="font-bold">Local mode</p>
+                <p className="mt-0.5 text-amber-800">{generationNotice}</p>
+              </div>
+            </div>
+          )}
 
           {/* Error Banner */}
           {errorMessage && (

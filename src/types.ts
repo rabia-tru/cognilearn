@@ -38,6 +38,8 @@ export interface StudyDeck {
   sourceFileName?: string;
   sourceFileSize?: string;
   stats: DeckStats;
+  /** True when the deck was built on-device because the backend was unreachable. */
+  generatedOffline?: boolean;
 }
 
 export type ViewMode = 'upload' | 'flashcards' | 'quiz' | 'deck-overview' | 'settings';

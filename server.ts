@@ -1,9 +1,17 @@
 import express, { Request, Response } from 'express';
 import http from 'http';
+import os from 'os';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+import {
+  generateOfflineDeck,
+  buildOfflineExplanation,
+  buildOfflineReinforcement,
+} from './src/utils/offlineGenerator';
+import { extractTextFromPdf, base64ToBytes } from './src/utils/pdfText';
 
 dotenv.config();
 
@@ -28,9 +36,38 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+/* ------------------------------------------------------------------ *
+ * AI AVAILABILITY
+ *
+ * The phone talks to this server over the LAN. If the AI provider is
+ * down, misconfigured or rate limited, the endpoints must fail fast
+ * (never hang for minutes) and fall back to the on-device generator so
+ * the mobile app keeps working.
+ * ------------------------------------------------------------------ */
+
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+const AI_TIMEOUT_MS = 45000;
+const AI_COOLDOWN_MS = 5 * 60 * 1000;
+
+let aiUnavailableUntil = 0;
+let aiUnavailableReason = '';
+
+const markAiUnavailable = (reason: string) => {
+  aiUnavailableUntil = Date.now() + AI_COOLDOWN_MS;
+  aiUnavailableReason = reason;
+  console.warn(`[AI] Marked unavailable for ${AI_COOLDOWN_MS / 1000}s: ${reason}`);
+};
+
+const isAiUnavailable = () => Date.now() < aiUnavailableUntil;
+
+const looksLikeAuthFailure = (message: string): boolean =>
+  /API[_ ]key not valid|API_KEY_INVALID|invalid_api_key|401|403|PERMISSION_DENIED|UNAUTHENTICATED/i.test(
+    message || ''
+  );
+
 // Server-side API key resolution
-const getGeminiKey = () => process.env.GEMINI_API_KEY || '';
-const getOpenAIKey = () => process.env.OPENAI_API_KEY || '';
+const getGeminiKey = () => (process.env.GEMINI_API_KEY || '').trim();
+const getOpenAIKey = () => (process.env.OPENAI_API_KEY || '').trim();
 
 const getAI = () =>
   new GoogleGenAI({
@@ -42,34 +79,127 @@ const getAI = () =>
     },
   });
 
+/** Runs a Gemini call with a hard timeout so the mobile app never waits forever. */
+const generateWithTimeout = async (
+  model: string,
+  contents: any,
+  config?: any
+): Promise<string> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const response: any = await getAI().models.generateContent({
+      model,
+      contents,
+      config: { ...(config || {}), abortSignal: controller.signal },
+    });
+    return response?.text || '';
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 async function callOpenAIText(prompt: string): Promise<string> {
   const apiKey = getOpenAIKey();
   if (!apiKey) throw new Error('No OpenAI API key');
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
-  const data: any = await res.json();
-  if (data?.error) {
-    throw new Error(`OpenAI: ${data.error.message || 'Error'}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+    const data: any = await res.json();
+    if (data?.error) {
+      throw new Error(`OpenAI: ${data.error.message || 'Error'}`);
+    }
+    return data?.choices?.[0]?.message?.content || '';
+  } finally {
+    clearTimeout(timer);
   }
-  return data?.choices?.[0]?.message?.content || '';
 }
+
+// LAN addresses the phone can use to reach this server.
+const getLanAddresses = (): string[] => {
+  const addresses: string[] = [];
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const entry of interfaces[name] || []) {
+      if (entry.family === 'IPv4' && !entry.internal) {
+        addresses.push(entry.address);
+      }
+    }
+  }
+  return addresses;
+};
 
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     hasApiKey: Boolean(getGeminiKey()),
+    aiAvailable: !isAiUnavailable(),
+    aiReason: aiUnavailableReason || null,
+    port: PORT,
+    lanAddresses: getLanAddresses(),
     time: new Date().toISOString(),
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Local (no-AI) helpers
+ * ------------------------------------------------------------------ */
+
+/** Pulls usable text out of a base64 upload, extracting PDF text when needed. */
+const extractTextFromUpload = async (
+  fileData: { mimeType?: string; base64?: string } | undefined,
+  fallbackText?: string
+): Promise<string> => {
+  if (fileData?.base64) {
+    const bytes = base64ToBytes(fileData.base64);
+    const mime = (fileData.mimeType || '').toLowerCase();
+    if (mime.includes('pdf') || bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50) {
+      const text = await extractTextFromPdf(bytes);
+      if (text.trim()) return text;
+    }
+  }
+  return (fallbackText || '').trim();
+};
+
+const buildLocalDeck = async (body: any) => {
+  const {
+    text,
+    fileData,
+    titleHint,
+    cardCount = 10,
+    quizCount = 6,
+    difficulty = 'intermediate',
+    focusArea = 'comprehensive',
+  } = body;
+
+  const extracted = await extractTextFromUpload(fileData, text);
+  if (!extracted) {
+    return null;
+  }
+
+  return generateOfflineDeck({
+    text: extracted,
+    titleHint,
+    cardCount,
+    quizCount,
+    difficulty,
+    focusArea,
+    sourceFileName: titleHint ? `${titleHint}.txt` : 'Uploaded Notes.txt',
+    sourceFileSize: `${extracted.length} chars`,
+  });
+};
 
 // Endpoint: Generate Study Deck from Document (Text, PDF, or Image)
 app.post('/api/generate-deck', async (req: Request, res: Response): Promise<void> => {
@@ -89,9 +219,24 @@ app.post('/api/generate-deck', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (!getGeminiKey()) {
-      res.status(500).json({
-        error: 'GEMINI_API_KEY is not configured on the server. Please check your environment variables.',
+    if (!getGeminiKey() || isAiUnavailable()) {
+      const localDeck = await buildLocalDeck(req.body);
+      if (!localDeck) {
+        res.status(400).json({
+          error:
+            'The AI backend is not configured right now and the document could not be read as text. ' +
+            'Paste the notes as text or add a valid GEMINI_API_KEY on the server.',
+          code: 'AI_UNAVAILABLE',
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        generatedOffline: true,
+        notice:
+          'The AI provider is unavailable, so this deck was built on the server with the local ' +
+          'document analyser. Add a valid GEMINI_API_KEY to get AI-written material.',
+        deck: localDeck,
       });
       return;
     }
@@ -203,31 +348,53 @@ ${text ? `Document Text:\n"""\n${text}\n"""` : ''}
       },
     };
 
-    // Resilient call with retry on 503/429
-    let response: any = null;
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+    // Resilient call with failover across models
+    let responseText = '';
+    let lastError: any = null;
 
-    for (const model of candidateModels) {
+    for (const model of AI_MODELS) {
       try {
-        response = await getAI().models.generateContent({
-          model,
-          contents,
-          config: schemaConfig,
-        });
-        if (response && response.text) break;
+        responseText = await generateWithTimeout(model, contents, schemaConfig);
+        if (responseText) break;
       } catch (callErr: any) {
-        console.warn(`Attempt with ${model} failed, checking retry...`, callErr?.message);
-        // Wait 1.2s before trying next candidate model
-        await new Promise((resolve) => setTimeout(resolve, 1200));
+        lastError = callErr;
+        const message = callErr?.message || String(callErr);
+        console.warn(`Attempt with ${model} failed: ${message}`);
+        if (looksLikeAuthFailure(message)) {
+          markAiUnavailable(message);
+          break;
+        }
+        if (callErr?.name === 'AbortError') {
+          lastError = new Error('The AI provider did not respond in time.');
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800));
       }
     }
 
-    if (!response || !response.text) {
-      throw new Error('AI service is temporarily busy. Please wait a moment and try again.');
+    if (!responseText) {
+      // AI failed -> build the deck locally so the phone still gets one.
+      const localDeck = await buildLocalDeck(req.body);
+      if (localDeck) {
+        res.json({
+          success: true,
+          generatedOffline: true,
+          notice:
+            'The AI provider did not answer, so this deck was built on the server with the local ' +
+            'document analyser.',
+          deck: localDeck,
+        });
+        return;
+      }
+
+      res.status(500).json({
+        error: lastError?.message || 'Failed to generate study deck from document.',
+        code: 'AI_UNAVAILABLE',
+      });
+      return;
     }
 
-    const jsonText = response.text || '{}';
-    const parsedData = JSON.parse(jsonText);
+    const parsedData = JSON.parse(responseText);
 
     res.json({
       success: true,
@@ -270,37 +437,57 @@ Format your response in neat, well-spaced markdown with bold highlights.
 
     let explanationText = '';
 
+    if (isAiUnavailable()) {
+      res.json({
+        success: true,
+        generatedOffline: true,
+        explanation: buildOfflineExplanation(concept || question || '', context || ''),
+      });
+      return;
+    }
+
     // 1. Try OpenAI if key is present
     if (getOpenAIKey()) {
       try {
         explanationText = await callOpenAIText(prompt);
       } catch (openAiErr: any) {
-        console.warn('OpenAI explanation failed (checking fallback):', openAiErr?.message);
-      }
-    }
-
-    // 2. Fallback to Google Gemini
-    if (!explanationText) {
-      const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash'];
-      for (const model of candidateModels) {
-        try {
-          const response = await getAI().models.generateContent({
-            model,
-            contents: prompt,
-          });
-          if (response && response.text) {
-            explanationText = response.text;
-            break;
-          }
-        } catch (callErr: any) {
-          console.warn(`Gemini attempt with ${model} failed:`, callErr?.message);
+        const message = openAiErr?.message || String(openAiErr);
+        console.warn('OpenAI explanation failed:', message);
+        if (looksLikeAuthFailure(message)) {
+          markAiUnavailable(message);
         }
       }
     }
 
+    // 2. Fallback to Google Gemini
+    if (!explanationText && !isAiUnavailable()) {
+      for (const model of AI_MODELS) {
+        try {
+          explanationText = await generateWithTimeout(model, prompt);
+          if (explanationText) break;
+        } catch (callErr: any) {
+          const message = callErr?.message || String(callErr);
+          console.warn(`Gemini attempt with ${model} failed: ${message}`);
+          if (looksLikeAuthFailure(message)) {
+            markAiUnavailable(message);
+            break;
+          }
+        }
+      }
+    }
+
+    if (!explanationText) {
+      res.json({
+        success: true,
+        generatedOffline: true,
+        explanation: buildOfflineExplanation(concept || question || '', context || ''),
+      });
+      return;
+    }
+
     res.json({
       success: true,
-      explanation: explanationText || 'No explanation generated.',
+      explanation: explanationText,
     });
   } catch (error: any) {
     console.error('Error explaining concept:', error);
@@ -314,6 +501,41 @@ Format your response in neat, well-spaced markdown with bold highlights.
 app.post('/api/reinforce-weak-areas', async (req: Request, res: Response): Promise<void> => {
   try {
     const { missedQuestions, topic, count = 4 } = req.body;
+
+    if (isAiUnavailable()) {
+      res.json({
+        success: true,
+        generatedOffline: true,
+        questions: buildOfflineReinforcement(
+          {
+            id: 'deck_local',
+            title: topic || 'Study Deck',
+            summary: '',
+            keyTopics: [],
+            estimatedStudyTimeMinutes: 5,
+            flashcards: (missedQuestions || []).map((m: any, index: number) => ({
+              id: `fc_local_${index + 1}`,
+              question: m.question,
+              answer: m.correctAnswer,
+              hint: m.explanation || '',
+              keyConcept: m.topicTag || 'Review',
+              topicTag: m.topicTag || 'Review',
+            })),
+            quiz: [],
+            createdAt: new Date().toISOString(),
+            stats: { timesStudied: 0, bestQuizScore: 0, quizzesTaken: 0 },
+          },
+          (missedQuestions || []).map((m: any) => ({
+            question: m.question,
+            correctAnswer: m.correctAnswer,
+            explanation: m.explanation,
+            topicTag: m.topicTag,
+          })),
+          count
+        ),
+      });
+      return;
+    }
 
     const prompt = `
 A student struggled with the following questions/concepts during their quiz on "${topic || 'Document Study'}":
@@ -345,24 +567,61 @@ Generate ${count} brand-new diagnostic reinforcement questions targeting these s
       },
     };
 
-    let response: any = null;
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+    let responseText = '';
+    let lastError: any = null;
 
-    for (const model of candidateModels) {
+    for (const model of AI_MODELS) {
       try {
-        response = await getAI().models.generateContent({
-          model,
-          contents: prompt,
-          config,
-        });
-        if (response && response.text) break;
+        responseText = await generateWithTimeout(model, prompt, config);
+        if (responseText) break;
       } catch (callErr: any) {
-        console.warn(`Attempt with ${model} failed, checking retry...`, callErr?.message);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        lastError = callErr;
+        const message = callErr?.message || String(callErr);
+        console.warn(`Attempt with ${model} failed: ${message}`);
+        if (looksLikeAuthFailure(message)) {
+          markAiUnavailable(message);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800));
       }
     }
 
-    const questions = JSON.parse(response.text || '[]');
+    if (!responseText) {
+      res.json({
+        success: true,
+        generatedOffline: true,
+        questions: buildOfflineReinforcement(
+          {
+            id: 'deck_local',
+            title: topic || 'Study Deck',
+            summary: '',
+            keyTopics: [],
+            estimatedStudyTimeMinutes: 5,
+            flashcards: (missedQuestions || []).map((m: any, index: number) => ({
+              id: `fc_local_${index + 1}`,
+              question: m.question,
+              answer: m.correctAnswer,
+              hint: m.explanation || '',
+              keyConcept: m.topicTag || 'Review',
+              topicTag: m.topicTag || 'Review',
+            })),
+            quiz: [],
+            createdAt: new Date().toISOString(),
+            stats: { timesStudied: 0, bestQuizScore: 0, quizzesTaken: 0 },
+          },
+          (missedQuestions || []).map((m: any) => ({
+            question: m.question,
+            correctAnswer: m.correctAnswer,
+            explanation: m.explanation,
+            topicTag: m.topicTag,
+          })),
+          count
+        ),
+      });
+      return;
+    }
+
+    const questions = JSON.parse(responseText || '[]');
     res.json({ success: true, questions });
   } catch (error: any) {
     console.error('Error reinforcing weak areas:', error);
@@ -397,7 +656,12 @@ async function startServer() {
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`CogniLearn server listening on port ${PORT} in ${isDev ? 'development' : 'production'} mode`);
+    const addresses = getLanAddresses();
+    console.log(
+      `CogniLearn server listening on port ${PORT} in ${isDev ? 'development' : 'production'} mode`
+    );
+    console.log(`  Local:   http://localhost:${PORT}`);
+    addresses.forEach((address) => console.log(`  Network: http://${address}:${PORT}`));
   });
 }
 

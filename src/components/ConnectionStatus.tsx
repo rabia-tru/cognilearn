@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Wifi, WifiOff, RefreshCw, Settings } from 'lucide-react';
-import { HARDCODED_BACKEND_URL, detectWorkingHost } from '../utils/api';
+import { detectWorkingHost, getActiveBackendUrl, getCandidateHosts } from '../utils/api';
 
 export const ConnectionStatus: React.FC = () => {
   const [status, setStatus] = useState<'connected' | 'disconnected' | 'testing'>('testing');
@@ -50,7 +50,7 @@ export const ConnectionStatus: React.FC = () => {
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-rose-900">Cannot connect to backend server</p>
                 <p className="text-[10px] text-rose-700 truncate">
-                  Server: {HARDCODED_BACKEND_URL}
+                  Server: {getActiveBackendUrl()}
                 </p>
               </div>
             </div>
@@ -81,6 +81,7 @@ export const ConnectionStatus: React.FC = () => {
                 <li>Phone connected via USB with debugging enabled</li>
                 <li>Run: <code className="bg-rose-100 px-1 rounded">adb reverse tcp:3000 tcp:3000</code></li>
                 <li>Or connect to same Wi-Fi network as your PC</li>
+                <li>Probed: {getCandidateHosts().join(', ')}</li>
               </ol>
               {lastChecked && (
                 <p className="text-[9px] text-rose-600 mt-1">
